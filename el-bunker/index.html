@@ -190,6 +190,15 @@ h2{font-family:"Stardos Stencil",serif;font-size:4.9cqw;margin:0;text-transform:
   .count{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);pointer-events:none}
 }
 @media (prefers-reduced-motion:reduce){.page,.page.flipped{transition-duration:.01s!important}.cover .hint{animation:none}}
+
+/* ===== v6: sin 3D pesado (estable en celulares) ===== */
+.book{perspective:1800px;transform-style:flat!important}
+.page{transform-style:flat!important;will-change:auto!important;visibility:hidden;transform:none}
+.page.flipped{transform:none;opacity:1}
+.face{backface-visibility:visible!important;-webkit-backface-visibility:visible!important}
+.face.back{display:none}
+.shade{display:none}
+.decor{filter:none!important;mix-blend-mode:normal!important}
 </style>
 </head>
 <body>
@@ -289,10 +298,11 @@ const pages = [
 ` },
 ];
 
-/* ================== MOTOR DEL LIBRO ================== */
+/* ================== MOTOR DEL LIBRO (una sola página visible a la vez) ================== */
 const book = document.getElementById('book');
 const N = pages.length;
-let cur = 0;
+const DUR = 560;
+let cur = 0, busy = false;
 
 const els = pages.map((p,i)=>{
   const el = document.createElement('div');
@@ -305,9 +315,7 @@ const els = pages.map((p,i)=>{
       <div class="inner">${p.html}</div>
       <div class="fade"></div><div class="scrollhint">Desliza ↓ para ver más</div>
       ${p.id==='toc'?'':foot}
-      <div class="shade"></div>
-    </div>
-    <div class="face back"><div class="camo"></div></div>`;
+    </div>`;
   book.appendChild(el);
   return el;
 });
@@ -315,63 +323,84 @@ const els = pages.map((p,i)=>{
 els.forEach(el=>{const i=el.querySelector('.inner'),f=el.querySelector('.fade'),h=el.querySelector('.scrollhint');
   const upd=()=>{const end=i.scrollTop+i.clientHeight>=i.scrollHeight-8;f.style.opacity=end?0:1;h.style.opacity=(end||i.scrollTop>20)?0:1};
   i.addEventListener('scroll',upd,{passive:true});setTimeout(upd,300);addEventListener('resize',upd)});
+
 const countEl=document.getElementById('count'), prevB=document.getElementById('prev'), nextB=document.getElementById('next');
-function render(){
-  els.forEach((el,i)=>{
-    el.classList.toggle('flipped',i<cur);
-    el.style.zIndex = i<cur ? i : N-i;
-    el.setAttribute('aria-hidden', i===cur ? 'false':'true');
-  });
+const ease='cubic-bezier(.45,.05,.25,1)';
+function st(el,o){
+  el.style.transition = o.t ? `transform ${DUR}ms ${ease}, opacity ${DUR}ms linear` : 'none';
+  el.style.transform = `rotateY(${o.rot||0}deg)`;
+  el.style.opacity = o.op===undefined ? 1 : o.op;
+  el.style.zIndex = o.z||1;
+  el.style.visibility = o.hide ? 'hidden' : 'visible';
+}
+function paint(){
+  els.forEach((el,i)=>{ st(el,{hide:i!==cur,z:2}); el.setAttribute('aria-hidden', i===cur?'false':'true'); });
   countEl.innerHTML = `<b>${String(cur+1).padStart(2,'0')}</b> / ${String(N).padStart(2,'0')}`;
   prevB.disabled = cur===0; nextB.disabled = cur===N-1;
   try{history.replaceState(null,'','#'+(cur+1))}catch(e){}
 }
-const go = i => { cur=Math.max(0,Math.min(N-1,i)); render(); };
-prevB.onclick=()=>go(cur-1); nextB.onclick=()=>go(cur+1);
-addEventListener('keydown',e=>{ if(e.key==='ArrowRight'||e.key==='PageDown')go(cur+1); if(e.key==='ArrowLeft'||e.key==='PageUp')go(cur-1); });
-book.addEventListener('click',e=>{ const b=e.target.closest('[data-go]'); if(b) go(+b.dataset.go); });
+function flip(dir){
+  const to=cur+dir;
+  if(busy||to<0||to>=N) return;
+  busy=true;
+  const a=els[cur], b=els[to];
+  if(dir===1){
+    st(b,{z:1}); st(a,{z:2}); void a.offsetWidth;
+    st(a,{rot:-100,op:0,z:2,t:true});
+  }else{
+    st(a,{z:2}); st(b,{rot:-100,op:0,z:3}); void b.offsetWidth;
+    st(b,{rot:0,op:1,z:3,t:true});
+  }
+  setTimeout(()=>{cur=to;paint();busy=false;},DUR+40);
+}
+const go = i => { i=Math.max(0,Math.min(N-1,i)); if(busy||i===cur) return;
+  if(Math.abs(i-cur)===1) flip(i-cur); else {cur=i;paint();} };
+prevB.onclick=()=>flip(-1); nextB.onclick=()=>flip(1);
+addEventListener('keydown',e=>{ if(e.key==='ArrowRight'||e.key==='PageDown')flip(1); if(e.key==='ArrowLeft'||e.key==='PageUp')flip(-1); });
 
 /* arrastre tipo página */
 let drag=null;
 book.addEventListener('pointerdown',e=>{
-  if(e.target.closest('[data-go]')) return;
-  drag={x:e.clientX,y:e.clientY,t:performance.now(),page:null,dir:0,moved:false,id:e.pointerId};
+  if(busy) return;
+  drag={x:e.clientX,y:e.clientY,t:performance.now(),a:null,b:null,dir:0,pr:0};
 });
 book.addEventListener('pointermove',e=>{
   if(!drag) return;
   const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
-  if(!drag.page){
+  if(!drag.dir){
     if(Math.abs(dx)<10 || Math.abs(dx)<Math.abs(dy)*1.2) return;
-    if(dx<0 && cur<N-1){drag.dir=1;drag.page=els[cur];}
-    else if(dx>0 && cur>0){drag.dir=-1;drag.page=els[cur-1];}
+    if(dx<0 && cur<N-1){drag.dir=1;drag.a=els[cur];drag.b=els[cur+1];st(drag.b,{z:1});}
+    else if(dx>0 && cur>0){drag.dir=-1;drag.a=els[cur];drag.b=els[cur-1];st(drag.b,{rot:-100,op:0,z:3});}
     else return;
-    drag.page.classList.add('dragging'); drag.moved=true;
     try{book.setPointerCapture(e.pointerId)}catch(_){}
   }
   const w=book.clientWidth, pr=Math.max(0,Math.min(1,Math.abs(dx)/w*1.25));
   drag.pr=pr;
-  const ang = drag.dir===1 ? -180*pr : -180+180*pr;
-  drag.page.style.transform=`rotateY(${ang}deg)`;
-  drag.page.querySelector('.shade').style.opacity = drag.dir===1 ? pr : 1-pr;
+  if(drag.dir===1) st(drag.a,{rot:-100*pr,op:1-Math.max(0,(pr-.4)/.6),z:2});
+  else st(drag.b,{rot:-100*(1-pr),op:Math.min(1,pr/.5),z:3});
 });
 function endDrag(e){
   if(!drag) return;
   const d=drag; drag=null;
-  if(d.page){
+  if(d.dir){
     const v=Math.abs(e.clientX-d.x)/Math.max(1,performance.now()-d.t);
     const done = d.pr>.3 || v>.5;
-    d.page.classList.remove('dragging'); d.page.style.transform=''; d.page.querySelector('.shade').style.opacity='';
-    if(done) cur += d.dir;
-    render();
-  } else if(Math.abs(e.clientX-d.x)<8 && Math.abs(e.clientY-d.y)<8 && !e.target.closest('[data-go]')){
+    busy=true;
+    if(d.dir===1){
+      if(done) st(d.a,{rot:-100,op:0,z:2,t:true}); else st(d.a,{rot:0,op:1,z:2,t:true});
+    }else{
+      if(done) st(d.b,{rot:0,op:1,z:3,t:true}); else st(d.b,{rot:-100,op:0,z:3,t:true});
+    }
+    setTimeout(()=>{ if(done) cur+=d.dir; paint(); busy=false; },DUR+40);
+  } else if(Math.abs(e.clientX-d.x)<8 && Math.abs(e.clientY-d.y)<8){
     const r=book.getBoundingClientRect(), f=(e.clientX-r.left)/r.width;
-    if(f>.78) go(cur+1); else if(f<.18) go(cur-1);
+    if(f>.78) flip(1); else if(f<.18) flip(-1);
   }
 }
 addEventListener('pointerup',endDrag); addEventListener('pointercancel',endDrag);
 
 const h=parseInt(location.hash.slice(1),10); if(h>0) cur=Math.min(N-1,h-1);
-render();
+paint();
 </script>
 </body>
 </html>
